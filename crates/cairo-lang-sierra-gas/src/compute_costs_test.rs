@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use cairo_lang_sierra::extensions::gas::CostTokenType;
 use cairo_lang_sierra::extensions::lib_func;
 use cairo_lang_sierra::ids::ConcreteLibfuncId;
-use cairo_lang_sierra::program::{Invocation, Program, StatementIdx};
+use cairo_lang_sierra::program::{BranchInfo, Invocation, Program, StatementIdx};
 use cairo_lang_utils::ordered_hash_map::OrderedHashMap;
 
 use super::SpecificCostContextTrait;
@@ -48,12 +48,12 @@ impl SpecificCostContextTrait<i32> for DummySpecificCostContext {
         todo!()
     }
 
-    fn get_branch_requirements(
+    fn get_branch_requirement(
         &self,
         wallet_at_fn: &mut dyn FnMut(&StatementIdx) -> i32,
         idx: &StatementIdx,
-        invocation: &Invocation,
-        libfunc_cost: &[crate::objects::BranchCost],
+        branch_info: &BranchInfo,
+        branch_cost: &BranchCost,
     ) -> Vec<i32> {
         todo!()
     }
@@ -62,7 +62,8 @@ impl SpecificCostContextTrait<i32> for DummySpecificCostContext {
 fn test_compute_costs(inputs: &OrderedHashMap<String, String>) -> OrderedHashMap<String, String> {
     let program = cairo_lang_sierra::ProgramParser::new().parse(&inputs["test_program"]).unwrap();
 
-    let gas_info = compute_costs(&program, &dummy_get_cost, &DummySpecificCostContext {});
+    let gas_info =
+        compute_costs(&program, &dummy_get_cost, &DummySpecificCostContext {}, &Default::default());
 
     OrderedHashMap::from([("gas_solution".into(), format!("{gas_info}"))])
 }
