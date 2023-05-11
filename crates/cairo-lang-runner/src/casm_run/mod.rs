@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use std::ops::{Deref, Shl};
 
 use ark_ff::fields::{Fp256, MontBackend, MontConfig};
-use ark_ff::{Field, PrimeField};
+use ark_ff::{BigInteger, Field, PrimeField};
+use ark_secp256k1 as secp256k1;
 use ark_std::UniformRand;
 use cairo_felt::{felt_str as felt252_str, Felt252, PRIME_STR};
 use cairo_lang_casm::hints::{CoreHint, DeprecatedHint, Hint, StarknetHint};
@@ -59,6 +60,13 @@ fn hint_to_hint_params(hint: &Hint) -> HintParams {
             reference_ids: HashMap::new(),
         },
     }
+}
+
+/// Helper object to allocate and track Secp256K1 ec points.
+#[derive(Default)]
+struct Secp256K1ExecScope {
+    /// All active ec points.
+    trackers: Vec<secp256k1::Affine>,
 }
 
 /// HintProcessor for Cairo compiler hints.
@@ -484,6 +492,152 @@ impl HintProcessor for CairoHintProcessor<'_> {
                             ((Felt252::from(state[1]) << 64u32) + Felt252::from(state[0])).into(),
                             ((Felt252::from(state[3]) << 64u32) + Felt252::from(state[2])).into(),
                         ]))
+                    })?;
+                } else if selector == "Secp256k1EcNew".as_bytes() {
+                    check_handle_oog(6, &mut |vm, gas_counter| {
+                        deduct_gas!(gas_counter, 500);
+                        let x: BigUint =
+                            get_double_deref_val(vm, cell, &(base_offset.clone() + 2u32))?
+                                .to_biguint()
+                                + get_double_deref_val(vm, cell, &(base_offset.clone() + 3u32))?
+                                    .to_biguint()
+                                    .shl(128);
+                        let y: BigUint =
+                            get_double_deref_val(vm, cell, &(base_offset.clone() + 4u32))?
+                                .to_biguint()
+                                + get_double_deref_val(vm, cell, &(base_offset.clone() + 5u32))?
+                                    .to_biguint()
+                                    .shl(128);
+                        let modulos = <secp256k1::Fq as PrimeField>::MODULUS.into();
+                        if x >= modulos || y >= modulos {
+                            fail_syscall!(b"Coordinates out of range");
+                        }
+                        let p = if x.is_zero() && y.is_zero() {
+                            secp256k1::Affine::identity()
+                        } else {
+                            secp256k1::Affine::new_unchecked(x.into(), y.into())
+                        };
+                        Ok(SyscallResult::Success(if !p.is_on_curve() {
+                            vec![1.into(), 0.into()]
+                        } else {
+                            let ec = match exec_scopes
+                                .get_mut_ref::<Secp256K1ExecScope>("secp256k1_exec_scope")
+                            {
+                                Ok(ec) => ec,
+                                Err(_) => {
+                                    exec_scopes.assign_or_update_variable(
+                                        "secp256k1_exec_scope",
+                                        Box::<Secp256K1ExecScope>::default(),
+                                    );
+                                    exec_scopes
+                                        .get_mut_ref::<Secp256K1ExecScope>("secp256k1_exec_scope")?
+                                }
+                            };
+                            let id = ec.trackers.len();
+                            ec.trackers.push(p);
+                            vec![0.into(), id.into()]
+                        }))
+                    })?;
+                } else if selector == "Secp256k1EcAdd".as_bytes() {
+                    check_handle_oog(4, &mut |vm, gas_counter| {
+                        deduct_gas!(gas_counter, 500);
+                        let p0 = get_double_deref_val(vm, cell, &(base_offset.clone() + 2u32))?
+                            .to_usize()
+                            .unwrap();
+                        let p1 = get_double_deref_val(vm, cell, &(base_offset.clone() + 3u32))?
+                            .to_usize()
+                            .unwrap();
+                        let ec = match exec_scopes
+                            .get_mut_ref::<Secp256K1ExecScope>("secp256k1_exec_scope")
+                        {
+                            Ok(ec) => ec,
+                            Err(_) => {
+                                exec_scopes.assign_or_update_variable(
+                                    "secp256k1_exec_scope",
+                                    Box::<Secp256K1ExecScope>::default(),
+                                );
+                                exec_scopes
+                                    .get_mut_ref::<Secp256K1ExecScope>("secp256k1_exec_scope")?
+                            }
+                        };
+
+                        let p0 = &ec.trackers[p0];
+                        let p1 = &ec.trackers[p1];
+                        let sum = *p0 + *p1;
+                        let id = ec.trackers.len();
+                        ec.trackers.push(sum.into());
+                        Ok(SyscallResult::Success(vec![id.into()]))
+                    })?;
+                } else if selector == "Secp256k1EcMul".as_bytes() {
+                    check_handle_oog(5, &mut |vm, gas_counter| {
+                        deduct_gas!(gas_counter, 500);
+                        let p = get_double_deref_val(vm, cell, &(base_offset.clone() + 2u32))?
+                            .to_usize()
+                            .unwrap();
+                        let m = get_double_deref_val(vm, cell, &(base_offset.clone() + 3u32))?
+                            .to_biguint()
+                            + get_double_deref_val(vm, cell, &(base_offset.clone() + 4u32))?
+                                .to_biguint()
+                                .shl(128);
+                        if m >= <secp256k1::Fr as PrimeField>::MODULUS.into() {
+                            fail_syscall!(b"Coordinates out of range");
+                        }
+                        let ec = match exec_scopes
+                            .get_mut_ref::<Secp256K1ExecScope>("secp256k1_exec_scope")
+                        {
+                            Ok(ec) => ec,
+                            Err(_) => {
+                                exec_scopes.assign_or_update_variable(
+                                    "secp256k1_exec_scope",
+                                    Box::<Secp256K1ExecScope>::default(),
+                                );
+                                exec_scopes
+                                    .get_mut_ref::<Secp256K1ExecScope>("secp256k1_exec_scope")?
+                            }
+                        };
+                        let p = &ec.trackers[p];
+                        let res = *p * secp256k1::Fr::from(m);
+                        let id = ec.trackers.len();
+                        ec.trackers.push(res.into());
+                        Ok(SyscallResult::Success(vec![id.into()]))
+                    })?;
+                } else if selector == "Secp256k1EcGetPointFromX".as_bytes() {
+                    check_handle_oog(5, &mut |vm, gas_counter| {
+                        deduct_gas!(gas_counter, 500);
+                        let x: BigUint =
+                            get_double_deref_val(vm, cell, &(base_offset.clone() + 2u32))?
+                                .to_biguint()
+                                + get_double_deref_val(vm, cell, &(base_offset.clone() + 3u32))?
+                                    .to_biguint()
+                                    .shl(128);
+                        let y_parity =
+                            !get_double_deref_val(vm, cell, &(base_offset.clone() + 4u32))?
+                                .is_zero();
+                        if x >= <secp256k1::Fq as PrimeField>::MODULUS.into() {
+                            fail_syscall!(b"Coordinates out of range");
+                        }
+                        let Some(mut p) = secp256k1::Affine::get_point_from_x_unchecked(x.into(), false) else {
+                            return Ok(SyscallResult::Success(vec![1.into(), 0.into()]));
+                        };
+                        if p.x.0.is_odd() != y_parity {
+                            p.y = -p.y;
+                        }
+                        let ec = match exec_scopes
+                            .get_mut_ref::<Secp256K1ExecScope>("secp256k1_exec_scope")
+                        {
+                            Ok(ec) => ec,
+                            Err(_) => {
+                                exec_scopes.assign_or_update_variable(
+                                    "secp256k1_exec_scope",
+                                    Box::<Secp256K1ExecScope>::default(),
+                                );
+                                exec_scopes
+                                    .get_mut_ref::<Secp256K1ExecScope>("secp256k1_exec_scope")?
+                            }
+                        };
+                        let id = ec.trackers.len();
+                        ec.trackers.push(p);
+                        Ok(SyscallResult::Success(vec![id.into()]))
                     })?;
                 } else if selector == "Deploy".as_bytes() {
                     check_handle_oog(7, &mut |vm, gas_counter| {
